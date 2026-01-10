@@ -1,0 +1,130 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// RTOS Handles
+QueueHandle_t commandQueue;
+TaskHandle_t t_Input;
+TaskHandle_t t_Display;
+TaskHandle_t t_Blink;
+
+// Shared Global Variable (protected by logic, or use a Mutex if you want extra points!)
+volatile int currentDelay = 1000; // Default 1 second blink
+
+// Data Structure for the Queue
+struct Command {
+  char text[20];
+  int blinkRate;
+};
+
+// ==========================================
+// TASK 1: THE HEART (Blink LED)
+// ==========================================
+void HeartTask(void *pvParameters) {
+  pinMode(2, OUTPUT);
+
+  for (;;) {
+
+    // TODO: Using the global variable(currentDelay) write a task to blink the led(on for 100ms) in intervals of currentDelay
+    digitalWrite(2, HIGH);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    digitalWrite(2, LOW);
+    vTaskDelay(currentDelay / portTICK_PERIOD_MS);
+  }
+}
+
+// ==========================================
+// TASK 2: THE EAR (Serial Input)
+// ==========================================
+void InputTask(void *pvParameters) {
+  Serial.begin(115200);
+
+  for (;;) {
+    if (Serial.available() > 0) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+
+      // JSON Parsing (Simplified)
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, input);
+
+      if (!error) {
+        Command cmd;
+
+        // TODO: Extract data from JSON
+        // 1. Copy doc["msg"] into cmd.text using strlcpy
+        // 2. Copy doc["delay"] into cmd.blinkRate
+        strlcpy(cmd.text, doc["msg"] | "NoMsg", sizeof(cmd.text));
+        cmd.blinkRate = doc["delay"] | 1000;
+
+        // TODO: Send 'cmd' to 'commandQueue'
+        xQueueSend(commandQueue, &cmd, portMAX_DELAY);
+
+        Serial.println("Command sent to queue!");
+      } else {
+        Serial.println("JSON Error");
+      }
+    }
+    vTaskDelay(50 / portTICK_PERIOD_MS); // Yield to other tasks
+  }
+}
+
+// ==========================================
+// TASK 3: THE FACE (OLED Display)
+// ==========================================
+void DisplayTask(void *pvParameters) {
+  Command receivedCmd;
+
+  // ESP32 I2C init (critical)
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    for (;;);
+  }
+
+  // Initial Screen
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println("Waiting...");
+  display.display();
+
+  for (;;) {
+    // TODO: Receive from Queue and wait here indefinitely (portMAX_DELAY) until a message arrives
+    if (xQueueReceive(commandQueue, &receivedCmd, portMAX_DELAY) == pdPASS) {
+
+      // TODO: Update the Global Variable for the Heart Task
+      currentDelay = receivedCmd.blinkRate;
+
+      // Updates the Screen
+      display.clearDisplay();
+      display.setCursor(0, 20);
+
+      // TODO: Print the text received from the queue
+      display.println(receivedCmd.text);
+
+      display.display();
+      Serial.println("Screen Updated.");
+    }
+  }
+}
+
+void setup() {
+  // TODO: Create Queue of size 5, element size = sizeof(Command)
+  commandQueue = xQueueCreate(5, sizeof(Command));
+
+  // TODO: Create Tasks
+  xTaskCreatePinnedToCore(HeartTask, "Blink", 2048, NULL, 1, &t_Blink, 0);
+  xTaskCreatePinnedToCore(InputTask, "Input", 4096, NULL, 1, &t_Input, 1);
+  xTaskCreatePinnedToCore(DisplayTask, "Display", 4096, NULL, 1, &t_Display, 1);
+}
+
+void loop() {}
